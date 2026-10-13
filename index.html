@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apigee SRE Observability</title>
+<meta name="description" content="How an SRE observability ladder — a RED dashboard with p90/p95/p99 latency, availability and latency SLOs, and multi-window burn-rate alerts — was built on Google Cloud Monitoring for Apigee X proxies, and what it revealed.">
+<meta name="author" content="Sreenivas Sadhu Prabhakara">
+<link rel="canonical" href="https://sreenivas-sadhu-prabhakara.github.io/apigee-sre-explained/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Apigee SRE Observability — RED, SLOs and burn-rate alerts explained">
+<meta property="og:description" content="A worked build of the full SRE ladder on Cloud Monitoring for Apigee X: RED + p90/95/99 dashboard, availability + latency SLOs, multi-window burn-rate alerts, error budget — and the latency tail the SLO caught that the percentile panel hid.">
+<meta property="og:url" content="https://sreenivas-sadhu-prabhakara.github.io/apigee-sre-explained/">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#f7f5f0; --panel:#fffefb; --ink:#191b20; --ink-2:#4a4f59; --muted:#737a86;
+  --line:#e4e0d6; --line-2:#d2cdc0;
+  --accent:#1e6f9f;      /* signal blue — links, active, "good" */
+  --accent-ink:#0f4f76;
+  --amber:#b7791f;       /* watch / warning */
+  --amber-bg:#fbf3df;
+  --red:#b4302a;         /* critical */
+  --red-bg:#f8e7e5;
+  --green:#1f7a4d; --green-bg:#e6f3ea;
+  --code-bg:#f0ede4; --code-ink:#2a2d34;
+  --shadow:0 1px 2px rgba(25,27,32,.05),0 8px 24px -16px rgba(25,27,32,.25);
+  --sans:"Space Grotesk",ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --maxw:860px;
+}
+:root[data-theme="dark"]{
+  --paper:#0e1116; --panel:#161a21; --ink:#e7eaef; --ink-2:#aeb6c2; --muted:#7f8794;
+  --line:#242a33; --line-2:#323a46;
+  --accent:#5ab0e0; --accent-ink:#8fcbed;
+  --amber:#e0a94a; --amber-bg:#30260f;
+  --red:#ef8078; --red-bg:#331a18;
+  --green:#5cc98c; --green-bg:#13271d;
+  --code-bg:#11151b; --code-ink:#c7cdd6;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px -18px rgba(0,0,0,.8);
+}
+@media (prefers-color-scheme:dark){
+  :root[data-theme="auto"]{
+    --paper:#0e1116; --panel:#161a21; --ink:#e7eaef; --ink-2:#aeb6c2; --muted:#7f8794;
+    --line:#242a33; --line-2:#323a46;
+    --accent:#5ab0e0; --accent-ink:#8fcbed;
+    --amber:#e0a94a; --amber-bg:#30260f;
+    --red:#ef8078; --red-bg:#331a18;
+    --green:#5cc98c; --green-bg:#13271d;
+    --code-bg:#11151b; --code-ink:#c7cdd6;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px -18px rgba(0,0,0,.8);
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);
+  font-size:17px;line-height:1.65;-webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 20px}
+a{color:var(--accent-ink);text-underline-offset:2px;text-decoration-thickness:1px}
+a:hover{color:var(--accent)}
+code,kbd,.mono{font-family:var(--mono)}
+code{background:var(--code-bg);color:var(--code-ink);padding:.12em .36em;border-radius:5px;font-size:.86em}
+h1,h2,h3{line-height:1.2;font-weight:600;letter-spacing:-.01em}
+h2{font-size:1.5rem;margin:2.6em 0 .2em}
+h3{font-size:1.12rem;margin:1.8em 0 .1em;font-weight:600}
+p{margin:.7em 0}
+hr{border:0;border-top:1px solid var(--line);margin:2.4em 0}
+
+/* top bar */
+.topbar{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--paper) 86%,transparent);
+  backdrop-filter:saturate(1.2) blur(8px);border-bottom:1px solid var(--line)}
+.topbar .wrap{display:flex;align-items:center;gap:14px;height:54px}
+.brand{display:flex;align-items:center;gap:9px;font-weight:600;font-size:.95rem;letter-spacing:.01em}
+.brand svg{width:22px;height:22px;flex:0 0 auto}
+.brand b{color:var(--ink)}
+.spacer{flex:1}
+.tbtn{font-family:var(--mono);font-size:.76rem;border:1px solid var(--line-2);background:var(--panel);
+  color:var(--ink-2);border-radius:7px;padding:6px 10px;cursor:pointer;line-height:1}
+.tbtn:hover{border-color:var(--accent);color:var(--accent)}
+.topbar a.tbtn{text-decoration:none}
+
+/* hero */
+header.hero{padding:52px 0 8px}
+.eyebrow{font-family:var(--mono);font-size:.74rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-ink);margin:0 0 14px}
+h1{font-size:clamp(1.9rem,5.2vw,2.9rem);margin:.1em 0 .35em;font-weight:700;letter-spacing:-.02em}
+.lede{font-size:1.16rem;color:var(--ink-2);max-width:46ch}
+.cta{display:flex;flex-wrap:wrap;gap:12px;margin:26px 0 8px}
+.btn{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:.82rem;font-weight:500;
+  border-radius:9px;padding:11px 16px;text-decoration:none;border:1px solid transparent;cursor:pointer}
+.btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+:root[data-theme="dark"] .btn.primary{color:#0e1116}
+@media(prefers-color-scheme:dark){:root[data-theme="auto"] .btn.primary{color:#0e1116}}
+.btn.primary:hover{filter:brightness(1.07)}
+.btn.ghost{background:var(--panel);color:var(--ink);border-color:var(--line-2)}
+.btn.ghost:hover{border-color:var(--accent);color:var(--accent)}
+.btn svg{width:16px;height:16px}
+
+/* fact strip */
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:1px;background:var(--line);
+  border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:30px 0 6px;box-shadow:var(--shadow)}
+.fact{background:var(--panel);padding:16px 16px}
+.fact .n{font-family:var(--mono);font-size:1.5rem;font-weight:700;color:var(--ink);line-height:1.1}
+.fact .l{font-size:.78rem;color:var(--muted);margin-top:4px}
+
+/* panels / callouts */
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:18px 0;box-shadow:var(--shadow)}
+.callout{border-radius:12px;padding:16px 18px;margin:20px 0;border:1px solid}
+.callout .h{font-family:var(--mono);font-size:.74rem;letter-spacing:.09em;text-transform:uppercase;font-weight:700;margin:0 0 6px;display:flex;gap:8px;align-items:center}
+.callout p{margin:.3em 0}
+.callout.finding{background:var(--amber-bg);border-color:color-mix(in srgb,var(--amber) 45%,var(--line))}
+.callout.finding .h{color:var(--amber)}
+.callout.note{background:color-mix(in srgb,var(--accent) 9%,var(--panel));border-color:color-mix(in srgb,var(--accent) 35%,var(--line))}
+.callout.note .h{color:var(--accent-ink)}
+
+/* definition rows */
+.deflist{border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:16px 0}
+.deflist .row{display:grid;grid-template-columns:120px 1fr;gap:14px;padding:13px 16px;border-top:1px solid var(--line);background:var(--panel)}
+.deflist .row:first-child{border-top:0}
+.deflist .k{font-family:var(--mono);font-size:.8rem;font-weight:700;color:var(--accent-ink)}
+.deflist .v{color:var(--ink-2);font-size:.95rem}
+.deflist .v b{color:var(--ink);font-weight:600}
+@media(max-width:560px){.deflist .row{grid-template-columns:1fr;gap:3px}}
+
+/* code block */
+pre{background:var(--code-bg);color:var(--code-ink);border:1px solid var(--line);border-radius:10px;
+  padding:15px 16px;overflow:auto;font-family:var(--mono);font-size:.82rem;line-height:1.55;position:relative;margin:16px 0}
+pre .cm{color:var(--muted)}
+.copy{position:absolute;top:8px;right:8px;font-family:var(--mono);font-size:.68rem;border:1px solid var(--line-2);
+  background:var(--panel);color:var(--ink-2);border-radius:6px;padding:3px 8px;cursor:pointer;opacity:.75}
+.copy:hover{opacity:1;border-color:var(--accent);color:var(--accent)}
+
+/* ladder */
+.ladder{display:grid;gap:10px;margin:18px 0}
+.rung{display:grid;grid-template-columns:34px 1fr;gap:14px;align-items:start;background:var(--panel);
+  border:1px solid var(--line);border-radius:11px;padding:14px 16px}
+.rung .num{font-family:var(--mono);font-weight:700;color:#fff;background:var(--accent);border-radius:8px;
+  width:34px;height:34px;display:grid;place-items:center;font-size:.9rem}
+:root[data-theme="dark"] .rung .num{color:#0e1116}
+@media(prefers-color-scheme:dark){:root[data-theme="auto"] .rung .num{color:#0e1116}}
+.rung h3{margin:.1em 0 .15em;font-size:1.02rem}
+.rung p{margin:0;font-size:.93rem;color:var(--ink-2)}
+
+figure{margin:22px 0}
+figure svg{width:100%;height:auto;display:block;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+figcaption{font-size:.84rem;color:var(--muted);margin-top:8px;text-align:center}
+
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0}
+.chip{font-family:var(--mono);font-size:.72rem;border:1px solid var(--line-2);border-radius:999px;padding:4px 10px;color:var(--ink-2);background:var(--panel)}
+.chip.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 40%,var(--line))}
+.chip.warn{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 40%,var(--line))}
+.chip.crit{color:var(--red);border-color:color-mix(in srgb,var(--red) 40%,var(--line))}
+
+ul.clean{padding-left:1.1em}
+ul.clean li{margin:.4em 0}
+.toc{font-family:var(--mono);font-size:.82rem;columns:2;column-gap:28px;margin:8px 0 0}
+.toc a{display:block;padding:3px 0;color:var(--ink-2);text-decoration:none}
+.toc a:hover{color:var(--accent)}
+@media(max-width:560px){.toc{columns:1}}
+
+footer{border-top:1px solid var(--line);margin-top:60px;padding:30px 0 60px;color:var(--muted);font-size:.86rem}
+footer a{color:var(--ink-2)}
+.sev{font-family:var(--mono);font-weight:700;font-size:.72rem;padding:2px 7px;border-radius:5px}
+.sev.crit{color:var(--red);background:var(--red-bg)}
+.sev.warn{color:var(--amber);background:var(--amber-bg)}
+small.meta{color:var(--muted);font-size:.8rem}
+</style>
+</head>
+<body>
+
+<div class="topbar"><div class="wrap">
+  <span class="brand">
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="1.5" y="1.5" width="21" height="21" rx="5" stroke="var(--accent)" stroke-width="1.5"/><path d="M4.5 15.5 L8 15.5 L10 7.5 L13 18 L15 11 L16.5 13.5 L19.5 13.5" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <b>Apigee&nbsp;SRE</b>&nbsp;observability
+  </span>
+  <span class="spacer"></span>
+  <a class="tbtn" href="apigee-sre-observability-explained.html" download>↓ .html</a>
+  <button class="tbtn" id="theme" type="button" aria-label="Toggle colour theme">◑ theme</button>
+</div></div>
+
+<div class="wrap">
+<header class="hero">
+  <p class="eyebrow">Google Cloud Monitoring · Apigee X</p>
+  <h1>Apigee SRE observability: a RED dashboard, SLOs and burn-rate alerts on Cloud Monitoring</h1>
+  <p class="lede">The full site-reliability ladder, built as code for the Apigee X proxies in one GCP project — and a walk through what each rung means, how it was wired, and the latency problem the SLO caught that the dashboard hid.</p>
+
+  <div class="cta">
+    <a class="btn primary" href="apigee-sre-observability-explained.html" download>
+      <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Download this page
+    </a>
+    <a class="btn ghost" href="https://github.com/Sreenivas-Sadhu-Prabhakara/apigee-sre-explained" rel="noopener">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48l-.01-1.7c-2.78.6-3.37-1.34-3.37-1.34-.46-1.16-1.11-1.47-1.11-1.47-.9-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.9 1.52 2.36 1.08 2.94.83.09-.65.35-1.08.63-1.33-2.22-.25-4.55-1.11-4.55-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02a9.5 9.5 0 0 1 5 0c1.91-1.29 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.85l-.01 2.75c0 .27.18.58.69.48A10 10 0 0 0 12 2Z"/></svg>
+      Source &amp; toolkit
+    </a>
+  </div>
+
+  <div class="facts">
+    <div class="fact"><div class="n">1</div><div class="l">RED + SLO dashboard · 11 widgets</div></div>
+    <div class="fact"><div class="n">2</div><div class="l">request-based SLOs</div></div>
+    <div class="fact"><div class="n">3</div><div class="l">burn-rate alert policies</div></div>
+    <div class="fact"><div class="n">p90</div><div class="l">/p95/p99 latency, the hard one</div></div>
+    <div class="fact"><div class="n">REST</div><div class="l">declarative, idempotent apply</div></div>
+  </div>
+  <p><small class="meta">Applied to GCP project <code>apigee-neg-psc</code>, environment <code>eval</code>, on 2026-10-13. All figures below were read back live from the Monitoring API, not estimated.</small></p>
+</header>
+
+<hr>
+
+<nav aria-label="Contents">
+  <p class="eyebrow">On this page</p>
+  <div class="toc">
+    <a href="#ladder">1 · The SRE ladder</a>
+    <a href="#red">2 · RED and the percentiles</a>
+    <a href="#slo">3 · SLOs and the error budget</a>
+    <a href="#burn">4 · Burn-rate alerting</a>
+    <a href="#built">5 · What was built</a>
+    <a href="#finding">6 · The finding: a hidden tail</a>
+    <a href="#operate">7 · Operating it</a>
+    <a href="#gotchas">8 · Gotchas worth knowing</a>
+    <a href="#next">9 · Caveats &amp; next steps</a>
+  </div>
+</nav>
+
+<!-- 1 -->
+<h2 id="ladder">1 · The SRE ladder</h2>
+<p>Site-reliability practice turns a vague goal ("the API should be up and fast") into measured, actionable signals. It builds in rungs, each one standing on the one below. Here is the whole ladder, as it was built for the <code>bank-ai-demo</code> proxy.</p>
+
+<div class="ladder">
+  <div class="rung"><div class="num">1</div><div><h3>A dashboard of the golden signals</h3><p>See rate, errors and latency per proxy, at a glance — the raw truth before any target is set.</p></div></div>
+  <div class="rung"><div class="num">2</div><div><h3>Service-level objectives (SLOs)</h3><p>Turn two of those signals into promises: how available, and how fast, the service should be over a window.</p></div></div>
+  <div class="rung"><div class="num">3</div><div><h3>An error budget</h3><p>The exact amount of failure the promise permits. 99.9% available is not "no failures" — it is a budget you can spend.</p></div></div>
+  <div class="rung"><div class="num">4</div><div><h3>Burn-rate alerts</h3><p>Page a human only when the budget is being spent too fast to last the window. Alert on risk, not on every blip.</p></div></div>
+</div>
+
+<figure>
+<svg viewBox="0 0 760 210" role="img" aria-label="The four rungs of the SRE ladder, each feeding the next.">
+  <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill="var(--muted)"/></marker></defs>
+  <g font-family="var(--mono)" font-size="12.5">
+    <g><rect x="16" y="70" width="150" height="70" rx="10" fill="var(--code-bg)" stroke="var(--line-2)"/><text x="91" y="100" text-anchor="middle" fill="var(--ink)" font-weight="700">Dashboard</text><text x="91" y="120" text-anchor="middle" fill="var(--muted)">RED signals</text></g>
+    <line x1="170" y1="105" x2="206" y2="105" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar)"/>
+    <g><rect x="210" y="70" width="150" height="70" rx="10" fill="var(--code-bg)" stroke="var(--line-2)"/><text x="285" y="100" text-anchor="middle" fill="var(--ink)" font-weight="700">SLOs</text><text x="285" y="120" text-anchor="middle" fill="var(--muted)">avail. + latency</text></g>
+    <line x1="364" y1="105" x2="400" y2="105" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar)"/>
+    <g><rect x="404" y="70" width="150" height="70" rx="10" fill="var(--code-bg)" stroke="var(--line-2)"/><text x="479" y="100" text-anchor="middle" fill="var(--ink)" font-weight="700">Error budget</text><text x="479" y="120" text-anchor="middle" fill="var(--muted)">what you may spend</text></g>
+    <line x1="558" y1="105" x2="594" y2="105" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar)"/>
+    <g><rect x="598" y="70" width="150" height="70" rx="10" fill="var(--accent)" stroke="var(--accent)"/><text x="673" y="100" text-anchor="middle" fill="#fff" font-weight="700">Burn alerts</text><text x="673" y="120" text-anchor="middle" fill="#e9f3fb">page on risk</text></g>
+  </g>
+</svg>
+<figcaption>Each rung is derived from the one before it. You cannot alert sensibly without a budget; you cannot have a budget without an objective; the objective reads the same signals the dashboard shows.</figcaption>
+</figure>
+
+<!-- 2 -->
+<h2 id="red">2 · RED and the percentiles</h2>
+<p>RED is three questions you ask of any request-serving system. It is the fastest honest health read there is.</p>
+<div class="deflist">
+  <div class="row"><div class="k">R — Rate</div><div class="v">Requests per second. The workload. Measured from <b>proxy/request_count</b> with a rate aligner.</div></div>
+  <div class="row"><div class="k">E — Errors</div><div class="v">The <b>fraction</b> of responses that failed, not the raw count. A ratio of 5xx responses over all responses — a count alone hides whether 50 errors is a catastrophe or a rounding error.</div></div>
+  <div class="row"><div class="k">D — Duration</div><div class="v">How long requests take, read at percentiles — <b>p90, p95, p99</b> — because an average hides the slow tail that users actually feel.</div></div>
+</div>
+
+<h3>Why p90 is the awkward one</h3>
+<p>Cloud Monitoring can compute percentiles from a raw latency distribution, but its aligner only offers the 5th, 50th, 95th and 99th — <strong>there is no p90</strong>. Apigee rescues the request: it emits a pre-computed gauge, <code>proxyv2/latencies_percentile</code>, that already carries p50, p90, p95 and p99 over a rolling two-minute window. So the dashboard reads p90 straight from that gauge. Cloud Run has no equivalent, so its panel honestly shows p50/p95/p99 and says p90 is unavailable.</p>
+<div class="callout note"><p class="h">◆ the subtlety</p><p>This pre-computed gauge is also the reason for the finding in section 6. A two-minute windowed percentile and a full distribution are different mathematical objects, and they disagree when there is a tail.</p></div>
+
+<!-- 3 -->
+<h2 id="slo">3 · SLOs and the error budget</h2>
+<p>An SLO is a promise expressed as "X% of events are good over a rolling window." Two were set on <code>bank-ai-demo</code>, the one proxy with sustained traffic.</p>
+<div class="deflist">
+  <div class="row"><div class="k">Availability</div><div class="v"><b>99.9%</b> of requests are non-5xx, over a rolling <b>28 days</b>. A good/total ratio.</div></div>
+  <div class="row"><div class="k">Latency</div><div class="v"><b>99%</b> of requests finish under <b>300&nbsp;ms</b>, over a rolling 28 days. A cut of the latency distribution.</div></div>
+</div>
+
+<p>The <strong>error budget</strong> is the mirror image of the objective — the failure the promise allows. This is where "99.9%" stops being an abstraction:</p>
+
+<figure>
+<svg viewBox="0 0 760 150" role="img" aria-label="An error budget bar: 99.9 percent good, a thin 0.1 percent budget equal to about 40 minutes over 28 days.">
+  <g font-family="var(--mono)" font-size="12.5">
+    <rect x="20" y="40" width="620" height="44" rx="7" fill="var(--green-bg)" stroke="var(--green)" stroke-width="1"/>
+    <rect x="620" y="40" width="120" height="44" rx="7" fill="var(--red-bg)" stroke="var(--red)" stroke-width="1"/>
+    <text x="330" y="67" text-anchor="middle" fill="var(--green)" font-weight="700">99.9% good — the objective</text>
+    <text x="700" y="30" text-anchor="middle" fill="var(--red)" font-weight="700">0.1%</text>
+    <line x1="700" y1="34" x2="700" y2="40" stroke="var(--red)"/>
+    <text x="700" y="104" text-anchor="middle" fill="var(--ink-2)">budget</text>
+    <text x="20" y="128" fill="var(--muted)">Over 28 days, 0.1% is about <tspan fill="var(--ink)" font-weight="700">40 minutes</tspan> of downtime, or roughly <tspan fill="var(--ink)" font-weight="700">88 failed requests</tspan> out of ~88,000.</text>
+  </g>
+</svg>
+<figcaption>The error budget converts a percentage into a spendable quantity of minutes and requests. Spend it slowly and nobody is paged; spend it in a burst and someone should be.</figcaption>
+</figure>
+
+<!-- 4 -->
+<h2 id="burn">4 · Burn-rate alerting</h2>
+<p>A flat "error rate &gt; 2%" alert is a bad pager: it screams at a one-minute blip and sleeps through a slow leak. Burn-rate alerting asks a better question — <em>at the current rate of spending, how fast is the budget running out?</em> A burn rate of 1 means the budget lasts exactly the window. A burn rate of 14.4 means it will be gone in about two hours.</p>
+<p>Two windows are watched at once, so fast disasters and slow erosion are both caught without false pages:</p>
+
+<figure>
+<svg viewBox="0 0 760 180" role="img" aria-label="Two burn-rate windows: a fast one over one hour that pages, and a slow one over six hours that files a ticket.">
+  <g font-family="var(--mono)" font-size="12.5">
+    <rect x="20" y="24" width="350" height="60" rx="9" fill="var(--red-bg)" stroke="var(--red)"/>
+    <text x="36" y="48" fill="var(--red)" font-weight="700">FAST · burn &gt; 14.4 over 1h</text>
+    <text x="36" y="70" fill="var(--ink-2)">~2% of budget in an hour → PAGE</text>
+    <rect x="390" y="24" width="350" height="60" rx="9" fill="var(--amber-bg)" stroke="var(--amber)"/>
+    <text x="406" y="48" fill="var(--amber)" font-weight="700">SLOW · burn &gt; 6 over 6h</text>
+    <text x="406" y="70" fill="var(--ink-2)">~5% of budget in six hours → TICKET</text>
+    <rect x="20" y="104" width="720" height="54" rx="9" fill="var(--code-bg)" stroke="var(--line-2)"/>
+    <text x="380" y="130" text-anchor="middle" fill="var(--ink)" font-weight="700">select_slo_burn_rate( &lt;slo&gt;, &lt;lookback&gt; ) &gt; threshold</text>
+    <text x="380" y="149" text-anchor="middle" fill="var(--muted)">one condition, the SLO's own burn-rate selector, two lookbacks</text>
+  </g>
+</svg>
+<figcaption>The fast window pages for an imminent breach; the slow window files a ticket for gradual erosion. The same construct covers the latency SLO too.</figcaption>
+</figure>
+<div class="chips">
+  <span class="chip crit"><span class="sev crit">CRIT</span>&nbsp; availability FAST 14.4×/1h</span>
+  <span class="chip warn"><span class="sev warn">WARN</span>&nbsp; availability SLOW 6×/6h</span>
+  <span class="chip crit"><span class="sev crit">CRIT</span>&nbsp; latency FAST 14.4×/1h</span>
+</div>
+
+<!-- 5 -->
+<h2 id="built">5 · What was built</h2>
+<p>Every object is a JSON file applied through the Cloud Monitoring REST API by one idempotent script, in dependency order. Re-running patches in place rather than duplicating. Server-assigned IDs are captured to a local state file.</p>
+<div class="deflist">
+  <div class="row"><div class="k">Channel</div><div class="v">An email notification channel (owner address) — where the alerts page.</div></div>
+  <div class="row"><div class="k">Service</div><div class="v"><b>apigee-bank-ai-demo-eval</b>, a custom Monitoring service the SLOs hang off.</div></div>
+  <div class="row"><div class="k">SLOs</div><div class="v"><b>availability-999</b> (good/total ratio, bad = response code 500–599) and <b>latency-p99-300ms</b> (distribution cut, 0–300&nbsp;ms).</div></div>
+  <div class="row"><div class="k">Alerts</div><div class="v">Three burn-rate policies, all enabled and wired to the channel, deterministic names.</div></div>
+  <div class="row"><div class="k">Dashboard</div><div class="v">"Apigee SRE — RED + SLO (eval)", 11 widgets — scorecards, rate/errors/latency by proxy, the error-budget gauge, and a Cloud Run panel.</div></div>
+</div>
+<p>The availability SLI counts anything that is not a 5xx as good. The two latency metrics are chosen deliberately and never cross-wired: the dashboard percentile panels read the <code>proxyv2/latencies_percentile</code> gauge (the only source of p90), while the latency SLO reads the <code>proxy/latencies</code> distribution (a gauge cannot carry a good/total ratio or a distribution cut).</p>
+
+<!-- 6 -->
+<h2 id="finding">6 · The finding: a tail the dashboard hid</h2>
+<p>This is the part worth the whole exercise. On the dashboard, <code>bank-ai-demo</code> looks fast: p99 sits near 140&nbsp;ms, comfortably under the 300&nbsp;ms line. The latency SLO, reading the same proxy over the same day, disagreed — it reported only <strong>92.7%</strong> of requests under 300&nbsp;ms, against a 99% target, with three-quarters of its error budget already spent.</p>
+
+<figure>
+<svg viewBox="0 0 760 250" role="img" aria-label="Two views of the same latency. The gauge p99 stays near 140ms under the 300ms line. The full distribution has a 7 percent tail above 300ms.">
+  <g font-family="var(--mono)" font-size="12">
+    <!-- left: gauge view -->
+    <text x="30" y="26" fill="var(--ink)" font-weight="700">Gauge · 2-min p99</text>
+    <line x1="30" y1="40" x2="30" y2="170" stroke="var(--line-2)"/>
+    <line x1="30" y1="170" x2="350" y2="170" stroke="var(--line-2)"/>
+    <line x1="30" y1="86" x2="350" y2="86" stroke="var(--red)" stroke-dasharray="4 4" opacity=".8"/>
+    <text x="346" y="80" text-anchor="end" fill="var(--red)">300ms target</text>
+    <path d="M30 150 C90 144 130 150 170 146 C220 142 270 150 350 147" fill="none" stroke="var(--accent)" stroke-width="2.4"/>
+    <text x="40" y="164" fill="var(--muted)">~140ms, always under the line</text>
+    <!-- right: distribution view -->
+    <text x="410" y="26" fill="var(--ink)" font-weight="700">Distribution · all requests</text>
+    <line x1="410" y1="40" x2="410" y2="170" stroke="var(--line-2)"/>
+    <line x1="410" y1="170" x2="740" y2="170" stroke="var(--line-2)"/>
+    <line x1="612" y1="40" x2="612" y2="170" stroke="var(--red)" stroke-dasharray="4 4" opacity=".8"/>
+    <text x="616" y="52" fill="var(--red)">300ms</text>
+    <!-- bulk under 300 -->
+    <rect x="430" y="150" width="16" height="20" fill="var(--green)" opacity=".8"/>
+    <rect x="450" y="120" width="16" height="50" fill="var(--green)" opacity=".85"/>
+    <rect x="470" y="86"  width="16" height="84" fill="var(--green)"/>
+    <rect x="490" y="104" width="16" height="66" fill="var(--green)" opacity=".9"/>
+    <rect x="510" y="128" width="16" height="42" fill="var(--green)" opacity=".8"/>
+    <rect x="530" y="146" width="16" height="24" fill="var(--green)" opacity=".7"/>
+    <rect x="550" y="156" width="16" height="14" fill="var(--green)" opacity=".6"/>
+    <rect x="570" y="160" width="16" height="10" fill="var(--green)" opacity=".5"/>
+    <!-- tail over 300 -->
+    <rect x="620" y="158" width="16" height="12" fill="var(--red)" opacity=".85"/>
+    <rect x="642" y="160" width="16" height="10" fill="var(--red)" opacity=".8"/>
+    <rect x="664" y="163" width="16" height="7"  fill="var(--red)" opacity=".75"/>
+    <rect x="686" y="164" width="16" height="6"  fill="var(--red)" opacity=".7"/>
+    <rect x="708" y="165" width="16" height="5"  fill="var(--red)" opacity=".65"/>
+    <text x="675" y="150" text-anchor="middle" fill="var(--red)" font-weight="700">~7% tail</text>
+  </g>
+</svg>
+<figcaption>Same proxy, same day. The windowed-percentile gauge averages the slow calls away; the full distribution counts every one, so the ~7% of requests over 300&nbsp;ms — the LLM backend's slow tail — are visible only to the SLO.</figcaption>
+</figure>
+
+<div class="callout finding"><p class="h">▲ why this matters, and that it is not a bug</p>
+<p>A two-minute-window p99, averaged across a day, smooths out bursts of slow requests. The distribution the SLO reads does not — it is every request's latency, tail and all. The gap between "p99 ≈ 140&nbsp;ms" and "only 92.7% under 300&nbsp;ms" is exactly the backend tail an SLO exists to surface. Both metrics are wired correctly; the SLO simply sees what the panel cannot.</p>
+<p>It is not currently breaching — the burn rate (~12.6) sits just under the fast-page threshold (14.4) — but the 300&nbsp;ms target was chosen against the optimistic gauge reading. If 300&nbsp;ms was meant to be comfortably met, widen the objective (for example 99% under 500&nbsp;ms, or 95% under 300&nbsp;ms) in the SLO file and re-apply.</p></div>
+
+<!-- 7 -->
+<h2 id="operate">7 · Operating it</h2>
+<p>The whole ladder is four commands. Everything is declarative, so the repo is the source of truth and the API is just where it is applied.</p>
+<pre><button class="copy" type="button">copy</button><span class="cm"># create or update everything, in dependency order (idempotent)</span>
+bash scripts/apply.sh
+
+<span class="cm"># prove it against live GCP — runs every check, asserts the real shapes</span>
+bash tests/test_e2e.sh
+
+<span class="cm"># modest traffic so the idle-proxy panels render (not a load test)</span>
+bash scripts/seed-traffic.sh 20
+
+<span class="cm"># remove everything, in reverse order</span>
+bash scripts/rollback.sh</pre>
+<p>Auth is the operator's own user credentials via a bearer token; no service-account key is stored. Deterministic IDs mean the alerts and dashboard can reference the SLO resource paths as literals, which is what makes <code>apply.sh</code> safe to re-run.</p>
+
+<!-- 8 -->
+<h2 id="gotchas">8 · Gotchas worth knowing</h2>
+<p>Four things that each cost a failed apply, written down so the next person skips them:</p>
+<ul class="clean">
+  <li><strong>Dashboards live on a different API version.</strong> Services, SLOs, alert policies and channels are Monitoring <code>v3</code>; dashboards are <code>v1</code> only. A dashboard call to v3 returns an HTML 404, not JSON.</li>
+  <li><strong>The response-code label is an integer.</strong> On <code>proxy/response_count</code>, <code>response_code</code> is INT64, so <code>starts_with("5")</code> is rejected — "function restrictions are only allowed for string type." Use a numeric range: <code>&gt;=500</code> and <code>&lt;600</code>. Dashboards do not validate filters at create time, so a bad one there fails silently at render; the SLO fails loudly.</li>
+  <li><strong>The CLI could not do the job; the API could.</strong> The installed <code>gcloud</code> had no subcommands for SLOs, services, channels, or Apigee env-groups. Everything was done over REST instead — one uniform, portable path.</li>
+  <li><strong>Old shell, no associative arrays.</strong> macOS ships Bash 3.2, which has no <code>declare -A</code>. The traffic seeder loops a plain list and resolves the env-group hostname over REST.</li>
+</ul>
+
+<!-- 9 -->
+<h2 id="next">9 · Caveats &amp; next steps</h2>
+<ul class="clean">
+  <li><strong>Verify the email channel.</strong> It came back with an unspecified verification status. Until it is confirmed, the burn-rate alerts have nowhere to page.</li>
+  <li><strong>Decide on the latency target.</strong> See section 6 — the 300&nbsp;ms objective is honest but tight against the real distribution. Widen it, or keep it and treat the tail as a backend task.</li>
+  <li><strong>Idle proxies read "no data"</strong> on the by-proxy panels until traffic flows. The seed lit up the proxies whose rejection happens inside the proxy; the ones gated by an API key before dispatch need a real key to register, which was left out of scope.</li>
+  <li><strong>The SLO window is warming up.</strong> Both SLOs compute forward over a 28-day window that is mostly empty today, so the budget readouts will settle as the window fills. The 92.7% figure is independent of this — it is measured straight off the distribution.</li>
+</ul>
+
+<hr>
+<p><a class="btn ghost" href="apigee-sre-observability-explained.html" download>
+  <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  Download this page as a single HTML file</a></p>
+
+</div>
+
+<footer><div class="wrap">
+  <p>A worked build of the SRE observability ladder on Google Cloud Monitoring for Apigee X. Figures read live from the Monitoring API on 2026-10-13; nothing here is estimated. No secrets or personal addresses are published on this page.</p>
+  <p><a href="https://github.com/Sreenivas-Sadhu-Prabhakara/apigee-sre-explained">Repository &amp; monitoring toolkit</a> · Built with Claude Code. Terms like RED, SLO, error budget and burn rate are standard site-reliability vocabulary.</p>
+</div></footer>
+
+<script>
+(function(){
+  var root=document.documentElement, KEY="apigee-sre-theme";
+  try{var s=localStorage.getItem(KEY); if(s){root.setAttribute("data-theme",s);}}catch(e){}
+  var btn=document.getElementById("theme");
+  function cur(){var t=root.getAttribute("data-theme"); if(t==="auto"||!t){return matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light";} return t;}
+  btn&&btn.addEventListener("click",function(){var next=cur()==="dark"?"light":"dark"; root.setAttribute("data-theme",next); try{localStorage.setItem(KEY,next);}catch(e){}});
+  document.querySelectorAll("pre .copy").forEach(function(b){
+    b.addEventListener("click",function(){
+      var pre=b.parentNode, txt=pre.innerText.replace(/^copy\n?/,"").trim();
+      navigator.clipboard&&navigator.clipboard.writeText(txt).then(function(){var o=b.textContent;b.textContent="copied";setTimeout(function(){b.textContent=o;},1200);});
+    });
+  });
+})();
+</script>
+</body>
+</html>
